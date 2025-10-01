@@ -1,5 +1,5 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters, CallbackContext
 import openpyxl
 from openpyxl import Workbook
 from collections import defaultdict
@@ -74,22 +74,18 @@ answers = ["Толық келісемін", "Келісемін", "Келісп�
 all_results = defaultdict(list)
 
 # ---------------- Excel-ге жазу ----------------
-# ---------------- Excel-ге жазу ----------------
 def save_to_excel(filename="survey_results.xlsx"):
     wb = Workbook()
     ws = wb.active
     ws.title = "Survey Results"
 
-    # 1-парақ: жеке жауаптар
     ws.append(["User ID", "Рөл", "Сұрақ", "Жауап"])
     for user_id, records in all_results.items():
         for role, q, a in records:
             ws.append([user_id, role, q, a])
 
-    # 2-парақ: статистика (әр жауаптың пайызы бөлек)
     ws_stats = wb.create_sheet("Statistics")
 
-    # Баған аттары
     header = ["Рөл", "Сұрақ"]
     for ans in answers:
         header.append(f"{ans} (саны)")
@@ -99,13 +95,11 @@ def save_to_excel(filename="survey_results.xlsx"):
     stats = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     total_counts = defaultdict(lambda: defaultdict(int))
 
-    # Жауаптарды санау
     for user_id, records in all_results.items():
         for role, q, a in records:
             stats[role][q][a] += 1
             total_counts[role][q] += 1
 
-    # Әр жауаптың өз пайызын есептеу
     for role, qs in stats.items():
         for q, answers_dict in qs.items():
             total = total_counts[role][q]
@@ -113,19 +107,14 @@ def save_to_excel(filename="survey_results.xlsx"):
 
             for ans in answers:
                 count = answers_dict.get(ans, 0)
-                if total > 0:
-                    percent = (count / total) * 100
-                else:
-                    percent = 0
-                row.append(count)               # саны
-                row.append(f"{percent:.2f}%")   # тек осы жауаптың пайызы
+                percent = (count / total) * 100 if total > 0 else 0
+                row.append(count)
+                row.append(f"{percent:.2f}%")
 
             ws_stats.append(row)
 
     wb.save(filename)
     return filename
-
-
 
 # ---------------- Email жіберу ----------------
 def send_email_with_attachment(receiver_email, subject, body, filename):
@@ -150,25 +139,25 @@ def send_email_with_attachment(receiver_email, subject, body, filename):
         server.send_message(msg)
 
 # ---------------- Telegram логикасы ----------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def start(update: Update, context: CallbackContext):
     keyboard = [
         [InlineKeyboardButton("Оқушы", callback_data="role_student")],
         [InlineKeyboardButton("Ата-ана", callback_data="role_parent")],
         [InlineKeyboardButton("Оқытушы", callback_data="role_teacher")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("125 AKTOBE мектебінің сауалнамасына қош келдіңіз! Өз рөліңізді таңдаңыз:", reply_markup=reply_markup)
+    update.message.reply_text("125 AKTOBE мектебінің сауалнамасына қош келдіңіз! Өз рөліңізді таңдаңыз:", reply_markup=reply_markup)
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def button(update: Update, context: CallbackContext):
     query = update.callback_query
-    await query.answer()
+    query.answer()
 
     if query.data.startswith("role_"):
         role = query.data.split("_")[1]
         context.user_data["role"] = role
         context.user_data["q_index"] = 0
         context.user_data["answers"] = []
-        await send_question(query, context)
+        send_question(query, context)
 
     elif query.data.startswith("ans_"):
         _, choice = query.data.split("_", 1)
@@ -177,13 +166,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if choice == "Басқа":
             context.user_data["awaiting_custom_answer"] = True
-            await query.message.reply_text("Өз жауабыңызды жазыңыз:")
+            query.message.reply_text("Өз жауабыңызды жазыңыз:")
         else:
             q = questions[role][q_index]
             context.user_data["answers"].append((role, q, choice))
-            await next_question(query, context)
+            next_question(query, context)
 
-async def custom_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def custom_answer(update: Update, context: CallbackContext):
     if context.user_data.get("awaiting_custom_answer"):
         role = context.user_data["role"]
         q_index = context.user_data["q_index"]
@@ -193,9 +182,9 @@ async def custom_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["answers"].append((role, q, answer_text))
         context.user_data["awaiting_custom_answer"] = False
 
-        await next_question(update, context, from_message=True)
+        next_question(update, context, from_message=True)
 
-async def next_question(source, context, from_message=False):
+def next_question(source, context, from_message=False):
     role = context.user_data["role"]
     context.user_data["q_index"] += 1
     q_index = context.user_data["q_index"]
@@ -205,20 +194,21 @@ async def next_question(source, context, from_message=False):
         keyboard = [[InlineKeyboardButton(a, callback_data=f"ans_{a}")] for a in answers]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await source.message.reply_text(question, reply_markup=reply_markup)
+        if from_message:
+            source.message.reply_text(question, reply_markup=reply_markup)
+        else:
+            source.message.reply_text(question, reply_markup=reply_markup)
     else:
         user_id = source.from_user.id if not from_message else source.message.from_user.id
         for role, q, a in context.user_data["answers"]:
             all_results[user_id].append((role, q, a))
 
         file = save_to_excel()
-
-        # Email жіберу
         send_email_with_attachment("125aktobe125@gmail.com", "Сауалнама нәтижелері", "Сауалнама жауаптары Excel файлында.", file)
 
-        await source.message.reply_text("✅ Сауалнама аяқталды! ")
+        source.message.reply_text("✅ Сауалнама аяқталды! ")
 
-async def send_question(query, context):
+def send_question(query, context):
     role = context.user_data["role"]
     q_index = context.user_data["q_index"]
     question = questions[role][q_index]
@@ -226,15 +216,19 @@ async def send_question(query, context):
     keyboard = [[InlineKeyboardButton(a, callback_data=f"ans_{a}")] for a in answers]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await query.message.reply_text(question, reply_markup=reply_markup)
+    query.message.reply_text(question, reply_markup=reply_markup)
 
 # ---------------- Запуск ----------------
 def main():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, custom_answer))
-    app.run_polling()
+    updater = Updater(TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CallbackQueryHandler(button))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, custom_answer))
+
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == "__main__":
     main()
